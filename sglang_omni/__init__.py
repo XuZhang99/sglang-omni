@@ -10,7 +10,7 @@ from sglang_omni.core.types import (
     SHMMetadata,
     StageInfo,
 )
-from sglang_omni.engine.base import EchoEngine, Engine
+from sglang_omni.engines.base import EchoEngine, Engine
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.pipeline.input_handler import (
     AggregatedInput,

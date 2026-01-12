@@ -8,7 +8,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from sglang_omni.core.types import CompleteMessage, DataReadyMessage
-from sglang_omni.engine.base import Engine
+from sglang_omni.engines.base import Engine
 
 if TYPE_CHECKING:
     from sglang_omni.pipeline.stage import Stage
