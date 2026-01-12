@@ -106,7 +106,7 @@ class Worker:
             descriptor = Descriptor((1, 0, "cpu", data))
 
             # Put data and get metadata
-            readable_op = self.stage.data_plane.put([descriptor])
+            readable_op = self.stage.relay.put([descriptor])
             await readable_op.wait_for_completion()
             metadata = readable_op.metadata()
 

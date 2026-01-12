@@ -67,7 +67,7 @@ class Stage:
         self.input_handler = input_handler or DirectInput()
 
         # Components
-        self.data_plane = relay or SHMRelay()
+        self.relay = relay or SHMRelay()
         self.control_plane = StageControlPlane(
             stage_name=name,
             recv_endpoint=recv_endpoint,
@@ -197,13 +197,13 @@ class Stage:
 
         if request_id in self._aborted_requests:
             logger.debug("Stage %s skipping aborted req=%s", self.name, request_id)
-            self.data_plane.cleanup(request_id)
+            self.relay.cleanup(request_id)
             return
 
         # Read data using unified relay interface
         try:
             # Use empty descriptor list - SHMRelay will return data in the operation object
-            read_op = self.data_plane.get(metadata=msg.shm_metadata, descriptors=[])
+            read_op = self.relay.get(metadata=msg.shm_metadata, descriptors=[])
             await read_op.wait_for_completion()
 
             # Get data from the operation object
@@ -231,7 +231,7 @@ class Stage:
         logger.debug("Stage %s: aborting req=%s", self.name, request_id)
         self._aborted_requests.add(request_id)
         self.input_handler.cancel(request_id)
-        self.data_plane.cleanup(request_id)
+        self.relay.cleanup(request_id)
 
         # Notify workers' engines
         for worker in self.workers:
@@ -251,5 +251,5 @@ class Stage:
             "running": self._running,
             "queue_size": self.request_queue.qsize(),
             "num_workers": len(self.workers),
-            "data_plane": self.data_plane.health(),
+            "relay": self.relay.health(),
         }
