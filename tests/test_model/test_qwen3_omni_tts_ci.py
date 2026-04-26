@@ -4,8 +4,6 @@
 Usage:
     pytest tests/test_model/test_qwen3_omni_tts_ci.py -s -x
 
-TODO (Jingwen, Chenyang): Support streaming for audio output
-and concurrency of vocoder.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from tests.utils import (
     assert_per_request_fields,
     assert_speed_thresholds,
     assert_summary_metrics,
-    assert_wer_results,
+    assert_wer_partitioned,
     no_proxy_env,
     start_server_from_cmd,
     stop_server,
@@ -40,27 +38,23 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# note (Chenyang): Currently we only run concurrency=1 and a small dataset
-# (seedtts-mini, 10 samples). Support higher concurrency and larger datasets
-# once the Qwen3-Omni pipeline is optimized for concurrent requests.
-
-CONCURRENCY = 1
-MAX_SAMPLES = 10
-# Also used in .github/workflows/test-qwen3-omni-ci.yaml — keep in sync.
-DATASET_CACHE_ENV = "SGLANG_SEEDTTS_MINI_DIR"
+CONCURRENCY = 8
+MAX_SAMPLES = 50
+DATASET_CACHE_ENV = "SGLANG_SEEDTTS50_DIR"
 
 STARTUP_TIMEOUT = 900
 WER_TIMEOUT = 600
 
-# note (Chenyang): P95 values measured on H20 CI machines with concurrency=1,
-# seedtts-mini dataset (5 samples). Update these when hardware or model changes.
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4321089804
+VC_WER_BELOW_50_CORPUS_MAX = 0.02
+VC_N_ABOVE_50_MAX = 1
 
 _VC_NON_STREAM_P95 = {
-    1: {
-        "throughput_qps": 0.17,
-        "tok_per_s_agg": 2.3,
-        "latency_mean_s": 6.0,
-        "rtf_mean": 2.0,
+    8: {
+        "throughput_qps": 0.523,
+        "tok_per_s_agg": 1.00,
+        "latency_mean_s": 14.709,
+        "rtf_mean": 4.2570,
     },
 }
 
@@ -69,15 +63,12 @@ _VC_NON_STREAM_P95 = {
 # Higher-is-better metrics (throughput): threshold = P95 x slack_higher
 # Lower-is-better metrics (latency, rtf): threshold = P95 x slack_lower
 
-THRESHOLD_SLACK_HIGHER = 0.75
-THRESHOLD_SLACK_LOWER = 1.25
+THRESHOLD_SLACK_HIGHER = 0.90
+THRESHOLD_SLACK_LOWER = 1.10
 
 VC_NON_STREAM_THRESHOLDS = apply_slack(
     _VC_NON_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
 )
-
-VC_WER_MAX_CORPUS = 0.06
-VC_WER_MAX_PER_SAMPLE = 0.30
 
 
 def _run_benchmark(
@@ -91,6 +82,7 @@ def _run_benchmark(
         meta=meta,
         output_dir=output_dir,
         max_samples=MAX_SAMPLES,
+        max_concurrency=CONCURRENCY,
         voice_clone=True,
     )
     speed_results = asyncio.run(run_omni_seedtts_benchmark(config))
@@ -184,7 +176,7 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
         root = Path(override_dir).expanduser()
     else:
         root = tmp_path_factory.mktemp("seed_tts_eval") / "data"
-    download_dataset(DATASETS["seedtts-mini"], str(root), quiet=True)
+    download_dataset(DATASETS["seedtts-50"], str(root), quiet=True)
     return root
 
 
@@ -275,7 +267,11 @@ def test_voice_cloning_wer(
         str(dataset_dir / "en" / "meta.lst"),
         wer_audio_dir,
     )
-    assert_wer_results(results, VC_WER_MAX_CORPUS, VC_WER_MAX_PER_SAMPLE)
+    assert_wer_partitioned(
+        results,
+        max_wer_below_50_corpus=VC_WER_BELOW_50_CORPUS_MAX,
+        max_n_above_50=VC_N_ABOVE_50_MAX,
+    )
 
 
 if __name__ == "__main__":

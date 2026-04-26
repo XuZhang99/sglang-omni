@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Video-MME TTS consistency CI for Qwen3-Omni. Thinker-Talker ON.
+"""Video-MME Talker CI for Qwen3-Omni. Thinker-Talker ON.
 
 Runs a small Video-MME subset through Text+Video -> Text+Audio, then checks
 text answer accuracy, text-audio WER, and basic speed metrics.
@@ -38,12 +38,19 @@ from benchmarks.eval.benchmark_omni_videomme import (
 from benchmarks.tasks.tts import print_speed_summary, print_wer_summary
 from benchmarks.tasks.video_understanding import print_videomme_accuracy_summary
 from sglang_omni.utils import find_available_port
-from tests.utils import ServerHandle, start_server_from_cmd, stop_server
+from tests.utils import (
+    ServerHandle,
+    apply_slack,
+    assert_speed_thresholds,
+    assert_wer_results,
+    start_server_from_cmd,
+    stop_server,
+)
 
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
-CONCURRENCY = 4
-MAX_SAMPLES = 20
+CONCURRENCY = 8
+MAX_SAMPLES = 10
 MAX_TOKENS = 256
 STARTUP_TIMEOUT = 900
 SHORT_ANSWER_PROMPT = (
@@ -51,21 +58,20 @@ SHORT_ANSWER_PROMPT = (
     "'Answer: $LETTER'. Do not include step-by-step reasoning."
 )
 
-# TODO: Recalibrate on H20 CI.
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4321051462
+VIDEOMME_TALKER_THINKER_TEXT_MIN_ACCURACY = 0.5
+VIDEOMME_TALKER_TEXT_AUDIO_WER_MAX_CORPUS = 0.013
+VIDEOMME_TALKER_TEXT_AUDIO_WER_MAX_PER_SAMPLE = 0.16
 
-VIDEOMME_TTS_THINKER_TEXT_MIN_ACCURACY = 0
-VIDEOMME_TTS_MAX_FAILED = 0
-VIDEOMME_TTS_TEXT_AUDIO_WER_MAX_CORPUS = 0
-VIDEOMME_TTS_TEXT_AUDIO_WER_MAX_PER_SAMPLE = 0
-
-VIDEOMME_TTS_THRESHOLDS = {
-    4: {
-        "throughput_qps_min": 0.000,
-        "tok_per_s_agg_min": 0.0,
-        "latency_mean_s_max": 0.0,
-        "rtf_mean_max": 0.0,
+_VIDEOMME_TALKER_AUDIO_P95 = {
+    8: {
+        "throughput_qps": 0.077,
+        "tok_per_s_agg": 0.60,
+        "latency_mean_s": 79.913,
+        "rtf_mean": 8.3397,
     },
 }
+VIDEOMME_TALKER_THRESHOLDS = apply_slack(_VIDEOMME_TALKER_AUDIO_P95)
 
 
 def _load_short_answer_samples() -> list[VideoMMESample]:
@@ -132,7 +138,8 @@ def test_videomme_tts_accuracy_wer_and_speed(
         video_max_pixels=401408,
         enable_audio=True,
         asr_device="cuda:0",
-        disable_tqdm=True,
+        disable_tqdm=False,
+        timeout_s=500,
     )
     results = asyncio.run(
         run_videomme_eval(config, samples=_load_short_answer_samples())
@@ -144,30 +151,24 @@ def test_videomme_tts_accuracy_wer_and_speed(
         results["speed"],
         config.model,
         CONCURRENCY,
-        title="Video-MME TTS Speed",
+        title="Video-MME Talker Speed",
     )
     print_wer_summary(results["wer"]["summary"], config.model)
 
-    failed = summary.get("failed", 0)
-    total = summary.get("total_samples", 0)
-    # assert failed <= VIDEOMME_TTS_MAX_FAILED, (
-    #     f"Video-MME TTS had {failed}/{total} failed requests, "
-    #     f"which exceeds the threshold {VIDEOMME_TTS_MAX_FAILED}"
-    # )
-    # assert summary["accuracy"] >= VIDEOMME_TTS_THINKER_TEXT_MIN_ACCURACY, (
-    #     f"Video-MME TTS thinker-text accuracy {summary['accuracy']:.4f} "
-    #     f"({summary['accuracy'] * 100:.1f}%) < "
-    #     f"threshold {VIDEOMME_TTS_THINKER_TEXT_MIN_ACCURACY} "
-    #     f"({VIDEOMME_TTS_THINKER_TEXT_MIN_ACCURACY * 100:.0f}%)"
-    # )
+    assert summary["accuracy"] >= VIDEOMME_TALKER_THINKER_TEXT_MIN_ACCURACY, (
+        f"Video-MME Talker thinker-text accuracy {summary['accuracy']:.4f} "
+        f"({summary['accuracy'] * 100:.1f}%) < "
+        f"threshold {VIDEOMME_TALKER_THINKER_TEXT_MIN_ACCURACY} "
+        f"({VIDEOMME_TALKER_THINKER_TEXT_MIN_ACCURACY * 100:.0f}%)"
+    )
 
-    # assert "wer" in results, "Audio WER results missing from Video-MME TTS output"
-    # assert_wer_results(
-    #     results["wer"],
-    #     VIDEOMME_TTS_TEXT_AUDIO_WER_MAX_CORPUS,
-    #     VIDEOMME_TTS_TEXT_AUDIO_WER_MAX_PER_SAMPLE,
-    # )
-    # assert_speed_thresholds(results["speed"], VIDEOMME_TTS_THRESHOLDS, CONCURRENCY)
+    assert "wer" in results, "Audio WER results missing from Video-MME Talker output"
+    assert_wer_results(
+        results["wer"],
+        VIDEOMME_TALKER_TEXT_AUDIO_WER_MAX_CORPUS,
+        VIDEOMME_TALKER_TEXT_AUDIO_WER_MAX_PER_SAMPLE,
+    )
+    assert_speed_thresholds(results["speed"], VIDEOMME_TALKER_THRESHOLDS, CONCURRENCY)
 
 
 if __name__ == "__main__":

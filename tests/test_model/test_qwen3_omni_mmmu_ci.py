@@ -33,16 +33,15 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 CONCURRENCY = 8
 STARTUP_TIMEOUT = 900
 
-MMMU_MIN_ACCURACY = 0.54
+MMMU_MIN_ACCURACY = 0.60
 
-# Note (Yifei, Chenyang): Thresholds reference
-# https://github.com/sgl-project/sglang-omni/pull/265#issuecomment-4228251028
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4321253588
 
 _MMMU_P95 = {
     8: {
-        "throughput_qps": 0.128,
-        "tok_per_s_agg": 13.1,
-        "latency_mean_s": 59.30,
+        "throughput_qps": 0.185,
+        "tok_per_s_agg": 14.60,
+        "latency_mean_s": 38.97,
     },
 }
 MMMU_THRESHOLDS = apply_slack(_MMMU_P95)

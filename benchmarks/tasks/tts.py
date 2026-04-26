@@ -25,7 +25,6 @@ from typing import Protocol
 
 import aiohttp
 import numpy as np
-import scipy.signal
 import soundfile as sf
 import torch
 import transformers
@@ -160,16 +159,21 @@ def load_asr_model(lang: str, device: str, generation_mode: str | None = None):
     """Load ASR model for voice clone WER evaluation."""
     mode_suffix = f" for {generation_mode} generation" if generation_mode else ""
     if lang == "en":
-        from transformers import WhisperForConditionalGeneration, WhisperProcessor
+        from transformers import pipeline
 
-        logger.info(f"Loading Whisper-large-v3 on {device}{mode_suffix}...")
+        logger.info(
+            f"Loading Whisper-large-v3 on {device}{mode_suffix} "
+            "(pipeline, chunk_length_s=30)..."
+        )
         t0 = time.perf_counter()
-        processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-        model = WhisperForConditionalGeneration.from_pretrained(
-            "openai/whisper-large-v3"
-        ).to(device)
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-large-v3",
+            chunk_length_s=30,
+            device=device,
+        )
         logger.info(f"Whisper loaded in {time.perf_counter() - t0:.1f}s{mode_suffix}")
-        return {"type": "whisper", "processor": processor, "model": model}
+        return {"type": "whisper", "pipeline": pipe}
     elif lang == "zh":
         from funasr import AutoModel
 
@@ -184,22 +188,14 @@ def load_asr_model(lang: str, device: str, generation_mode: str | None = None):
 
 def transcribe(asr: dict, wav_path: str, lang: str, device: str) -> str:
     if asr["type"] == "whisper":
-        processor = asr["processor"]
-        model = asr["model"]
-        wav, sr = sf.read(wav_path)
-        if sr != 16000:
-            wav = scipy.signal.resample(wav, int(len(wav) * 16000 / sr))
-        input_features = processor(
-            wav, sampling_rate=16000, return_tensors="pt"
-        ).input_features.to(device)
-        forced_decoder_ids = processor.get_decoder_prompt_ids(
-            language="english", task="transcribe"
+        # pipeline internally chunks at chunk_length_s=30 with stride overlap,
+        # so outputs longer than 30 s are transcribed end-to-end rather than
+        # silently truncated to the first 30 s.
+        result = asr["pipeline"](
+            wav_path,
+            generate_kwargs={"language": "english", "task": "transcribe"},
         )
-        with torch.no_grad():
-            predicted_ids = model.generate(
-                input_features, forced_decoder_ids=forced_decoder_ids
-            )
-        return processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+        return result["text"]
     elif asr["type"] == "funasr":
         import zhconv
 
@@ -257,6 +253,7 @@ def calculate_wer_metrics(outputs: list[SampleOutput], lang: str) -> dict:
             "wer_per_sample_median": 0.0,
             "wer_per_sample_std": 0.0,
             "wer_per_sample_p95": 0.0,
+            "wer_per_sample_max": 0.0,
             "wer_below_50_corpus": 0.0,
             "n_above_50_pct_wer": 0,
             "pct_above_50_pct_wer": 0.0,
@@ -293,6 +290,7 @@ def calculate_wer_metrics(outputs: list[SampleOutput], lang: str) -> dict:
         "wer_per_sample_median": float(np.median(wer_arr)),
         "wer_per_sample_std": float(np.std(wer_arr)),
         "wer_per_sample_p95": float(np.percentile(wer_arr, 95)),
+        "wer_per_sample_max": float(np.max(wer_arr)),
         "wer_below_50_corpus": float(wer_below_50_micro),
         "n_above_50_pct_wer": n_above_50,
         "pct_above_50_pct_wer": (n_above_50 / len(successes) * 100 if successes else 0),
@@ -388,6 +386,11 @@ def print_wer_summary(
     print(
         f"  {'WER per-sample p95:':<{lw}} "
         f"{metrics.get('wer_per_sample_p95', 0):.4f}"
+    )
+    print(
+        f"  {'WER per-sample max:':<{lw}} "
+        f"{metrics.get('wer_per_sample_max', 0):.4f} "
+        f"({metrics.get('wer_per_sample_max', 0) * 100:.2f}%)"
     )
     print(
         f"  {'WER corpus (excl >50%):':<{lw}} "

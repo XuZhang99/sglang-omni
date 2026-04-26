@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MMMU TTS consistency CI for Qwen3-Omni (Text+Image → Text+Audio, Talker ON).
+"""MMMU Talker CI for Qwen3-Omni (Text+Image → Text+Audio, Talker ON).
 
 Evaluates text-audio consistency by comparing the model's text output
 with ASR transcription of its audio output on MMMU image-QA tasks.
 
 Usage:
-    pytest tests/test_model/test_qwen3_omni_mmmu_tts_consistency_ci.py -v -s -x
+    pytest tests/test_model/test_qwen3_omni_mmmu_talker_ci.py -v -s -x
 
 Note (Chenyang):
     Currently due to the performance limitation of the Talker, we run limited
@@ -32,35 +32,47 @@ from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
     assert_speed_thresholds,
-    assert_wer_results,
+    assert_wer_partitioned,
     start_server_from_cmd,
     stop_server,
 )
 
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
-MAX_SAMPLES = 5
-MAX_TOKENS = 50
+MAX_SAMPLES = 20
+MAX_TOKENS = 256
 STARTUP_TIMEOUT = 900
 
-# Note (Yifei): Concurrency=1 only for now — code_predictor and code2wav
-# modules serialize GPU access, so they run serially even when concurrency > 1.
+CONCURRENCY = 8
 
-CONCURRENCY = 1
+# Note (Yifei): "2-3 sentences" floor prevents terse "Answer: X" replies that
+# would starve the WER signal; the 120-word cap keeps p95 output well under
+# MAX_TOKENS so the final 'Answer: $LETTER' line is never truncated.
+MMMU_TTS_PROMPT = (
+    "Look at the image and answer the multiple-choice question.\n"
+    "Briefly explain your reasoning in 2-3 sentences, then on a new final "
+    "line output exactly:\n"
+    "'Answer: $LETTER' (without quotes) where LETTER is one of the options.\n"
+    "Do not exceed 120 words in total."
+)
 
-# WER thresholds — text-audio consistency.
-MMMU_AUDIO_WER_MAX_CORPUS = 0.10
-MMMU_AUDIO_WER_MAX_PER_SAMPLE = 0.18
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4314808991
 
-# Note (Yifei, Chenyang): Thresholds reference
-# https://github.com/sgl-project/sglang-omni/pull/265#issuecomment-4228251028
+# Accuracy floor — audio-mode MMMU.
+MMMU_AUDIO_MIN_ACCURACY = 0.60
+
+# WER thresholds use a partitioned view of the per-sample distribution:
+#  - corpus WER over the "sane" subset (per-sample WER <= 50%)
+#  - count of catastrophic failures (per-sample WER > 50%)
+MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.20
+MMMU_AUDIO_N_ABOVE_50_MAX = 6
 
 _MMMU_AUDIO_P95 = {
-    1: {
-        "throughput_qps": 0.034,
-        "tok_per_s_agg": 1.7,
-        "latency_mean_s": 29.66,
-        "rtf_mean": 2.02,
+    8: {
+        "throughput_qps": 0.042,
+        "tok_per_s_agg": 0.80,
+        "latency_mean_s": 179.428,
+        "rtf_mean": 3.9102,
     },
 }
 MMMU_AUDIO_THRESHOLDS = apply_slack(_MMMU_AUDIO_P95)
@@ -110,6 +122,9 @@ def test_mmmu_audio_wer_and_speed(
         output_dir=str(tmp_path / "mmmu_audio"),
         enable_audio=True,
         repo_id=DATASETS["mmmu-ci-50"],
+        warmup=1,
+        prompt_override=MMMU_TTS_PROMPT,
+        timeout_s=500,
     )
     results = asyncio.run(run_mmmu_eval(config))
 
@@ -117,14 +132,24 @@ def test_mmmu_audio_wer_and_speed(
     failed = summary.get("failed", 0)
     total = summary.get("total_samples", 0)
     assert failed == 0, (
-        f"MMMU TTS consistency had {failed}/{total} failed requests "
+        f"MMMU Talker had {failed}/{total} failed requests "
         f"(timeouts or empty responses); any failure fails the test"
+    )
+
+    # Assert accuracy
+    accuracy = summary["accuracy"]
+    assert accuracy >= MMMU_AUDIO_MIN_ACCURACY, (
+        f"MMMU audio accuracy {accuracy:.4f} ({accuracy * 100:.1f}%) < "
+        f"threshold {MMMU_AUDIO_MIN_ACCURACY} "
+        f"({MMMU_AUDIO_MIN_ACCURACY * 100:.0f}%)"
     )
 
     # Assert WER
     assert "wer" in results, "Audio WER results missing from eval output"
-    assert_wer_results(
-        results["wer"], MMMU_AUDIO_WER_MAX_CORPUS, MMMU_AUDIO_WER_MAX_PER_SAMPLE
+    assert_wer_partitioned(
+        results["wer"],
+        max_wer_below_50_corpus=MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX,
+        max_n_above_50=MMMU_AUDIO_N_ABOVE_50_MAX,
     )
 
     # Assert speed

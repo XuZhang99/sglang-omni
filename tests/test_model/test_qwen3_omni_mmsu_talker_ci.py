@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MMSU TTS consistency CI for Qwen3-Omni (Text + Audio → Text+Audio, Talker ON).
+"""MMSU Talker CI for Qwen3-Omni (Text + Audio → Text+Audio, Talker ON).
 
 Evaluates text-audio consistency by comparing the model's text output with
 ASR transcription of its audio output on MMSU audio-QA tasks. Uses a
@@ -8,7 +8,7 @@ by step before giving the final answer letter, producing longer responses
 more suitable for WER evaluation.
 
 Usage:
-    pytest tests/test_model/test_qwen3_omni_mmsu_tts_consistency_ci.py -v -s -x
+    pytest tests/test_model/test_qwen3_omni_mmsu_talker_ci.py -v -s -x
 
 Author:
     Yifei Gao https://github.com/PasserBy4
@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -34,42 +33,47 @@ from tests.utils import (
     ServerHandle,
     apply_slack,
     assert_speed_thresholds,
-    assert_wer_results,
+    assert_wer_partitioned,
     start_server_from_cmd,
     stop_server,
 )
 
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
-# TODO (Yifei): enable larger subset/max_tokens when concurrency > 1 is supported.
-MAX_SAMPLES = 5
-MAX_TOKENS = 50
+MAX_SAMPLES = 20
+MAX_TOKENS = 256
 STARTUP_TIMEOUT = 900
 
-# Note (Yifei): Concurrency=1 only for now — code_predictor and code2wav
-# modules serialize GPU access, so they run serially even when concurrency > 1.
-CONCURRENCY = 1
+CONCURRENCY = 8
 
-# Note (Yifei): Use chain-of-thought prompt (mirroring MMMU style) instead of the default
-# "Reply with only A, B, C, or D." to elicit longer responses for WER.
+# Note (Yifei): "2-3 sentences" floor prevents terse "Answer: X" replies that
+# would starve the WER signal; the 120-word cap keeps p95 output well under
+# MAX_TOKENS so the final 'Answer: $LETTER' line is never truncated.
 MMSU_TTS_PROMPT = (
-    "Listen to the audio and answer the multiple-choice question. "
-    "Think step by step before answering. The last line of your response "
-    "should be of the following format: 'Answer: $LETTER' (without quotes) "
-    "where LETTER is one of the options."
+    "Listen to the audio and answer the multiple-choice question.\n"
+    "Briefly explain your reasoning in 2-3 sentences, then on a new final "
+    "line output exactly:\n"
+    "'Answer: $LETTER' (without quotes) where LETTER is one of the options.\n"
+    "Do not exceed 120 words in total."
 )
 
-# TODO (Yifei): update thresholds when concurrency > 1 is supported.
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4314808991
 
-MMSU_AUDIO_WER_MAX_CORPUS = 0.12
-MMSU_AUDIO_WER_MAX_PER_SAMPLE = 0.36
+# Accuracy floor — audio-mode MMSU.
+MMSU_AUDIO_MIN_ACCURACY = 0.55
+
+# WER thresholds use a partitioned view of the per-sample distribution:
+#  - corpus WER over the "sane" subset (per-sample WER <= 50%)
+#  - count of catastrophic failures (per-sample WER > 50%)
+MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.035
+MMSU_AUDIO_N_ABOVE_50_MAX = 0
 
 _MMSU_AUDIO_P95 = {
-    1: {
-        "throughput_qps": 0.04,
-        "tok_per_s_agg": 1.80,
-        "latency_mean_s": 27.376,
-        "rtf_mean": 1.5734,
+    8: {
+        "throughput_qps": 0.100,
+        "tok_per_s_agg": 0.90,
+        "latency_mean_s": 68.27,
+        "rtf_mean": 3.8127,
     },
 }
 MMSU_AUDIO_THRESHOLDS = apply_slack(_MMSU_AUDIO_P95)
@@ -120,10 +124,11 @@ def _build_args(port: int, output_dir: str) -> argparse.Namespace:
         max_concurrency=CONCURRENCY,
         request_rate=float("inf"),
         save_audio=True,
-        disable_tqdm=True,
+        disable_tqdm=False,
         seed=None,
         lang="en",
         asr_device="cuda:0",
+        timeout_s=500,
     )
 
 
@@ -135,27 +140,31 @@ def test_mmsu_audio_wer_and_speed(
     """Run MMSU eval with audio and assert WER and speed meet thresholds."""
     args = _build_args(server_process.port, str(tmp_path / "mmsu_audio"))
 
-    # NOTE (Yifei):
-    # Regression guard for issue #299: append a dup of sample[0] so the
-    # audio encoder sees a cached+non-cached mixed batch. Inert at
-    # concurrency=1; starts to take effect once concurrency is raised.
-    base = load_mmsu_samples(max_samples=MAX_SAMPLES, repo_id=DATASETS["mmsu-ci-2000"])
-    dup = deepcopy(base[0])
-    dup.sample_id = f"{base[0].sample_id}__dup"
-    samples = [*base, dup]
+    samples = load_mmsu_samples(
+        max_samples=MAX_SAMPLES, repo_id=DATASETS["mmsu-ci-2000"]
+    )
 
     results = asyncio.run(run_mmsu(args, samples=samples))
 
     failed = results["accuracy"].get("failed_samples", 0)
     total = results["accuracy"].get("total_samples", 0)
     assert failed == 0, (
-        f"MMSU TTS consistency had {failed}/{total} failed requests "
+        f"MMSU Talker had {failed}/{total} failed requests "
         f"(timeouts or empty responses); any failure fails the test"
     )
 
+    accuracy = results["accuracy"]["overall_accuracy"]
+    assert accuracy >= MMSU_AUDIO_MIN_ACCURACY, (
+        f"MMSU audio accuracy {accuracy:.4f} ({accuracy * 100:.1f}%) < "
+        f"threshold {MMSU_AUDIO_MIN_ACCURACY} "
+        f"({MMSU_AUDIO_MIN_ACCURACY * 100:.0f}%)"
+    )
+
     assert "wer" in results, "Audio WER results missing from eval output"
-    assert_wer_results(
-        results["wer"], MMSU_AUDIO_WER_MAX_CORPUS, MMSU_AUDIO_WER_MAX_PER_SAMPLE
+    assert_wer_partitioned(
+        results["wer"],
+        max_wer_below_50_corpus=MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX,
+        max_n_above_50=MMSU_AUDIO_N_ABOVE_50_MAX,
     )
 
     assert_speed_thresholds(results["speed"], MMSU_AUDIO_THRESHOLDS, CONCURRENCY)

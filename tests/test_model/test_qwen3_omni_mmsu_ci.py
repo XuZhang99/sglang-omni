@@ -37,11 +37,12 @@ STARTUP_TIMEOUT = 900
 
 MMSU_MIN_ACCURACY = 0.69
 
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/337#issuecomment-4321253588
 _MMSU_P95 = {
     8: {
-        "throughput_qps": 9.94,
-        "tok_per_s_agg": 2.60,
-        "latency_mean_s": 0.804,
+        "throughput_qps": 10.912,
+        "tok_per_s_agg": 2.80,
+        "latency_mean_s": 0.733,
     },
 }
 MMSU_THRESHOLDS = apply_slack(_MMSU_P95)
@@ -83,8 +84,9 @@ def _build_args(port: int, output_dir: str) -> argparse.Namespace:
         warmup=1,
         max_concurrency=CONCURRENCY,
         request_rate=float("inf"),
+        timeout_s=300,
         save_audio=False,
-        disable_tqdm=True,
+        disable_tqdm=False,
         seed=None,
         repo_id=DATASETS["mmsu-ci-2000"],
         # Unused in text-only mode but kept for API consistency with run().
