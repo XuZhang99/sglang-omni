@@ -19,16 +19,67 @@ import aiohttp
 from benchmarks.benchmarker.data import RequestResult
 from benchmarks.benchmarker.runner import SendFn
 from benchmarks.benchmarker.utils import get_wav_duration, print_accuracy_breakdown
-from benchmarks.dataset.videomme import VideoMMESample
+from benchmarks.dataset.videomme import VideoAMMESample, VideoMMESample
 from benchmarks.tasks.visual_understand import parse_multi_choice_response
 
 logger = logging.getLogger(__name__)
 
 SUMMARY_LABEL_WIDTH = 28
 SUMMARY_LINE_WIDTH = 50
+VIDEOAMME_REQUEST_TEXT = (
+    "Use the video and the audio question to answer. "
+    "Return the final answer as Answer: $LETTER."
+)
 
 
-def make_videomme_send_fn(
+def _apply_chat_completion_response(
+    result: RequestResult,
+    body: dict[str, Any],
+    *,
+    audio_output_dir: str | None,
+    sample_id: str,
+) -> bool:
+    message = body.get("choices", [{}])[0].get("message", {})
+    result.text = message.get("content", "") or ""
+    wav_bytes = b""
+
+    if audio_output_dir:
+        audio_obj = message.get("audio")
+        if not isinstance(audio_obj, dict):
+            result.error = "No audio in response"
+            return False
+        audio_b64 = audio_obj.get("data", "")
+        if not audio_b64:
+            result.error = "Empty audio data in response"
+            return False
+        try:
+            wav_bytes = base64.b64decode(audio_b64, validate=True)
+            result.audio_duration_s = round(get_wav_duration(wav_bytes), 4)
+        except (binascii.Error, ValueError, struct.error) as exc:
+            result.error = f"Invalid audio data: {exc}"
+            return False
+
+    usage = body.get("usage", {})
+    if usage:
+        result.prompt_tokens = usage.get("prompt_tokens", 0)
+        result.completion_tokens = usage.get("completion_tokens", 0)
+
+    if audio_output_dir and result.audio_duration_s > 0:
+        try:
+            os.makedirs(audio_output_dir, exist_ok=True)
+            wav_path = os.path.join(audio_output_dir, f"{sample_id}.wav")
+            with open(wav_path, "wb") as f:
+                f.write(wav_bytes)
+        except OSError as exc:
+            result.error = f"Failed to save audio: {exc}"
+            return False
+        result.wav_path = wav_path
+
+    result.is_success = True
+    return True
+
+
+def make_video_send_fn(
     model_name: str,
     api_url: str,
     *,
@@ -39,30 +90,35 @@ def make_videomme_send_fn(
     video_min_pixels: int | None = None,
     video_max_pixels: int | None = None,
     video_total_pixels: int | None = None,
-    enable_audio: bool = False,
-    audio_dir: str | None = None,
+    enable_audio_input: bool = False,
+    audio_output_dir: str | None = None,
+    fixed_prompt: str | None = None,
 ) -> SendFn:
-    modalities = ["text", "audio"] if enable_audio else ["text"]
+    modalities = ["text", "audio"] if audio_output_dir else ["text"]
 
     async def send_fn(
         session: aiohttp.ClientSession,
-        sample: VideoMMESample,
+        sample: VideoMMESample | VideoAMMESample,
     ) -> RequestResult:
+        prompt = fixed_prompt or sample.prompt
         result = RequestResult(
             request_id=sample.sample_id,
-            text=sample.prompt[:60],
+            text=prompt[:60],
         )
 
         payload: dict[str, Any] = {
             "model": model_name,
-            "messages": [{"role": "user", "content": sample.prompt}],
+            "messages": [{"role": "user", "content": prompt}],
             "videos": [sample.video_path],
             "modalities": modalities,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
         }
-        if enable_audio:
+        if enable_audio_input:
+            assert isinstance(sample, VideoAMMESample)
+            payload["audios"] = [sample.audio_path]
+        if audio_output_dir:
             payload["audio"] = {"format": "wav"}
         if video_fps is not None:
             payload["video_fps"] = video_fps
@@ -81,29 +137,13 @@ def make_videomme_send_fn(
                 response.raise_for_status()
                 body = await response.json()
 
-            message = body.get("choices", [{}])[0].get("message", {})
-            result.text = message.get("content", "") or ""
-
-            if enable_audio and audio_dir:
-                audio_obj = message.get("audio")
-                if not isinstance(audio_obj, dict):
-                    result.error = "No audio in response"
-                    return result
-                audio_b64 = audio_obj.get("data", "")
-                if not audio_b64:
-                    result.error = "Empty audio data in response"
-                    return result
-                try:
-                    wav_bytes = base64.b64decode(audio_b64, validate=True)
-                    result.audio_duration_s = round(get_wav_duration(wav_bytes), 4)
-                except (binascii.Error, ValueError, struct.error) as exc:
-                    result.error = f"Invalid audio data: {exc}"
-                    return result
-
-            usage = body.get("usage", {})
-            if usage:
-                result.prompt_tokens = usage.get("prompt_tokens", 0)
-                result.completion_tokens = usage.get("completion_tokens", 0)
+            if not _apply_chat_completion_response(
+                result,
+                body,
+                audio_output_dir=audio_output_dir,
+                sample_id=sample.sample_id,
+            ):
+                return result
 
             elapsed = time.perf_counter() - start_time
             result.engine_time_s = elapsed
@@ -111,18 +151,6 @@ def make_videomme_send_fn(
                 result.rtf = elapsed / result.audio_duration_s
             if result.completion_tokens > 0 and result.engine_time_s > 0:
                 result.tok_per_s = result.completion_tokens / result.engine_time_s
-
-            if enable_audio and audio_dir and result.audio_duration_s > 0:
-                try:
-                    os.makedirs(audio_dir, exist_ok=True)
-                    wav_path = os.path.join(audio_dir, f"{sample.sample_id}.wav")
-                    with open(wav_path, "wb") as f:
-                        f.write(wav_bytes)
-                except OSError as exc:
-                    result.error = f"Failed to save audio: {exc}"
-                    return result
-                result.wav_path = wav_path
-            result.is_success = True
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             result.error = str(exc)
         finally:
@@ -252,10 +280,15 @@ def compute_videomme_metrics(
     return summary, per_sample
 
 
-def print_videomme_accuracy_summary(metrics: dict[str, Any], model_name: str) -> None:
+def print_videomme_accuracy_summary(
+    metrics: dict[str, Any],
+    model_name: str,
+    *,
+    title: str = "Video-MME Accuracy",
+) -> None:
     lw = SUMMARY_LABEL_WIDTH
     print(f"\n{'=' * SUMMARY_LINE_WIDTH}")
-    print(f"  Video-MME Accuracy — {model_name}")
+    print(f"  {title} — {model_name}")
     print(f"{'=' * SUMMARY_LINE_WIDTH}")
     print(f"  {'Total samples:':<{lw}} {metrics['total_samples']}")
     print(f"  {'Correct:':<{lw}} {metrics['correct']}")

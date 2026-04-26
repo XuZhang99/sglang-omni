@@ -92,7 +92,7 @@ from benchmarks.tasks.tts import (
 )
 from benchmarks.tasks.video_understanding import (
     compute_videomme_metrics,
-    make_videomme_send_fn,
+    make_video_send_fn,
     print_videomme_accuracy_summary,
 )
 
@@ -104,7 +104,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class VideoMMEEvalConfig:
+class VideoEvalConfig:
     model: str
     split: str = "test"
     base_url: str | None = None
@@ -130,31 +130,37 @@ class VideoMMEEvalConfig:
     lang: str = "en"
 
 
-def _build_base_url(config: VideoMMEEvalConfig) -> str:
+def _build_base_url(config: VideoEvalConfig) -> str:
     return config.base_url or f"http://{config.host}:{config.port}"
 
 
-async def run_videomme_eval(
-    config: VideoMMEEvalConfig,
+async def run_video_eval(
+    config: VideoEvalConfig,
     *,
     samples: list[VideoMMESample] | None = None,
+    load_samples=load_videomme_samples,
+    task_label: str,
+    output_filename: str,
+    audio_output_dir_default: str,
+    enable_audio_input: bool = False,
+    fixed_prompt: str | None = None,
 ) -> dict:
     base_url = _build_base_url(config)
     api_url = f"{base_url}/v1/chat/completions"
 
     if samples is None:
-        samples = load_videomme_samples(
+        samples = load_samples(
             repo_id=config.repo_id,
             split=config.split,
             max_samples=config.max_samples,
         )
-    logger.info("Prepared %d Video-MME samples", len(samples))
-    audio_dir = None
+    logger.info("Prepared %d %s samples", len(samples), task_label)
+    audio_output_dir = None
     if config.enable_audio:
-        output_root = Path(config.output_dir or "results/videomme_audio")
-        audio_dir = str(output_root / "audio")
+        output_root = Path(config.output_dir or audio_output_dir_default)
+        audio_output_dir = str(output_root / "audio")
 
-    send_fn = make_videomme_send_fn(
+    send_fn = make_video_send_fn(
         config.model,
         api_url,
         max_tokens=config.max_tokens,
@@ -164,8 +170,9 @@ async def run_videomme_eval(
         video_min_pixels=config.video_min_pixels,
         video_max_pixels=config.video_max_pixels,
         video_total_pixels=config.video_total_pixels,
-        enable_audio=config.enable_audio,
-        audio_dir=audio_dir,
+        enable_audio_input=enable_audio_input,
+        audio_output_dir=audio_output_dir,
+        fixed_prompt=fixed_prompt,
     )
     runner = BenchmarkRunner(
         RunConfig(
@@ -212,13 +219,13 @@ async def run_videomme_eval(
         )
 
     if config.output_dir:
-        save_json_results(results, config.output_dir, "videomme_results.json")
+        save_json_results(results, config.output_dir, output_filename)
 
     return results
 
 
-def _config_from_args(args: argparse.Namespace) -> VideoMMEEvalConfig:
-    return VideoMMEEvalConfig(
+def video_eval_config_from_args(args: argparse.Namespace) -> VideoEvalConfig:
+    return VideoEvalConfig(
         model=args.model,
         repo_id=args.repo_id,
         split=args.split,
@@ -238,44 +245,23 @@ def _config_from_args(args: argparse.Namespace) -> VideoMMEEvalConfig:
         warmup=args.warmup,
         request_rate=args.request_rate,
         disable_tqdm=args.disable_tqdm,
+        timeout_s=args.timeout_s,
         enable_audio=args.enable_audio,
         asr_device=args.asr_device,
         lang=args.lang,
     )
 
 
-async def benchmark(args: argparse.Namespace) -> dict:
-    config = _config_from_args(args)
-    results = await run_videomme_eval(config)
-    print_videomme_accuracy_summary(results["summary"], config.model)
-    print_speed_summary(
-        results["speed"],
-        config.model,
-        config.max_concurrency,
-        title="Video-MME Speed",
-    )
-    if "wer" in results:
-        print_wer_summary(results["wer"]["summary"], config.model)
-    return results
+def _config_from_args(args: argparse.Namespace) -> VideoEvalConfig:
+    return video_eval_config_from_args(args)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Video-MME benchmark for video understanding models."
-    )
+def add_video_eval_args(parser: argparse.ArgumentParser, *, repo_help: str) -> None:
     parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", type=str, default="qwen3-omni")
-    parser.add_argument(
-        "--repo-id",
-        type=str,
-        default=None,
-        help=(
-            "HuggingFace dataset repo for Video-MME. "
-            f"Defaults to {_VIDEOMME_DEFAULT_REPO}."
-        ),
-    )
+    parser.add_argument("--repo-id", type=str, default=None, help=repo_help)
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
@@ -289,6 +275,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--max-concurrency", type=int, default=1)
     parser.add_argument("--request-rate", type=float, default=float("inf"))
+    parser.add_argument("--timeout-s", type=int, default=300)
     parser.add_argument("--disable-tqdm", action="store_true")
     parser.add_argument(
         "--enable-audio",
@@ -306,6 +293,39 @@ def main() -> None:
         choices=["en", "zh"],
         default="en",
         help="Language for ASR transcription when --enable-audio is used.",
+    )
+
+
+async def benchmark(args: argparse.Namespace) -> dict:
+    config = _config_from_args(args)
+    results = await run_video_eval(
+        config,
+        task_label="Video-MME",
+        output_filename="videomme_results.json",
+        audio_output_dir_default="results/videomme_audio",
+    )
+    print_videomme_accuracy_summary(results["summary"], config.model)
+    print_speed_summary(
+        results["speed"],
+        config.model,
+        config.max_concurrency,
+        title="Video-MME Speed",
+    )
+    if "wer" in results:
+        print_wer_summary(results["wer"]["summary"], config.model)
+    return results
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Video-MME benchmark for video understanding models."
+    )
+    add_video_eval_args(
+        parser,
+        repo_help=(
+            "HuggingFace dataset repo for Video-MME. "
+            f"Defaults to {_VIDEOMME_DEFAULT_REPO}."
+        ),
     )
     args = parser.parse_args()
 
