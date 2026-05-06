@@ -18,6 +18,7 @@ from sglang_omni_v1.models.qwen3_omni.payload_types import PipelineState, Thinke
 from sglang_omni_v1.proto import StagePayload
 from sglang_omni_v1.scheduling.messages import OutgoingMessage
 from sglang_omni_v1.scheduling.sglang_backend import SGLangARRequestData
+from sglang_omni_v1.scheduling.types import ARRequestData
 
 IMAGE_STAGE = "image_encoder"
 AUDIO_STAGE = "audio_encoder"
@@ -30,10 +31,6 @@ class EncoderRequestData:
     model_inputs: dict[str, Any]
     cache_key: str | None = None
     skip_result: dict[str, Any] | None = None
-
-
-class ARRequestData:
-    """AR request data — base for SGLangARRequestData."""
 
 
 def build_encoder_request(
