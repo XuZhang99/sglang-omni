@@ -13,13 +13,6 @@ from pathlib import Path
 from typing import Generator
 
 STARTUP_TIMEOUT = 600
-# Note (Chenyang): Add for V1.
-_SERVER_VERSION_ENV = "SGLANG_OMNI_SERVER_VERSION"
-_QWEN3_LAUNCHERS = {
-    "run_qwen3_omni_server.py",
-    "run_qwen3_omni_speech_server.py",
-}
-# Note (Chenyang): End for V1.
 
 
 @dataclass
@@ -117,28 +110,6 @@ def wait_healthy(
         raise
 
 
-# Note (Chenyang): Add for V1.
-def _has_version_flag(cmd: list[str]) -> bool:
-    return any(arg == "--version" or arg.startswith("--version=") for arg in cmd)
-
-
-def _inject_server_version(cmd: list[str]) -> list[str]:
-    version = os.environ.get(_SERVER_VERSION_ENV)
-    if version != "v1" or _has_version_flag(cmd):
-        return list(cmd)
-
-    if len(cmd) >= 4 and cmd[1:4] == ["-m", "sglang_omni.cli", "serve"]:
-        return [*cmd[:4], "--version", version, *cmd[4:]]
-
-    if len(cmd) >= 2 and Path(cmd[1]).name in _QWEN3_LAUNCHERS:
-        return [*cmd, "--version", version]
-
-    return list(cmd)
-
-
-# Note (Chenyang): End for V1.
-
-
 def start_server_from_cmd(
     cmd: list[str],
     log_file: Path | None,
@@ -147,26 +118,19 @@ def start_server_from_cmd(
     env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Start a server from an arbitrary command and wait until healthy."""
-    # Note (Chenyang): Add for V1.
-    resolved_cmd = _inject_server_version(cmd)
-    # Note (Chenyang): End for V1.
     process_env = os.environ.copy()
     if env is not None:
         process_env.update(env)
     if log_file is None:
-        # Note (Chenyang): Add for V1.
         proc = subprocess.Popen(
-            resolved_cmd,
+            cmd,
             env=process_env,
             start_new_session=True,
         )
-        # Note (Chenyang): End for V1.
     else:
         with open(log_file, "w") as log_handle:
             proc = subprocess.Popen(
-                # Note (Chenyang): Add for V1.
-                resolved_cmd,
-                # Note (Chenyang): End for V1.
+                cmd,
                 env=process_env,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
