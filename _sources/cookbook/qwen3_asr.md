@@ -20,9 +20,11 @@ Async decode is enabled by default for decode batches of at least two requests,
 allowing the shared one-step-lookahead path to overlap host-side result
 processing with the next GPU decode forward. Use `--decode-mode sync` to disable
 it, or tune the crossover with `--async-lookahead-min-batch-size`.
-The request builders also use the shared LM prefill-admission gate while more
-request builds are pending: prefill starts when 16 built requests are ready,
-after the oldest ready request waits 24 ms, or immediately when build work drains.
+The request builders also use the shared LM prefill-admission gate: prefill
+starts when 16 built requests are ready or after the oldest ready request waits
+24 ms. Once request-build work drains, a ready prefill is released immediately
+if decode is idle; while decode is active, it continues coalescing until the
+same request target or deadline.
 
 ```bash
 sgl-omni serve \
@@ -30,6 +32,19 @@ sgl-omni serve \
   --model-name Qwen/Qwen3-ASR-1.7B \
   --port 8000
 ```
+
+For a single 24 GB RTX 4090 (SM89), use the checked-in consumer profile:
+
+```bash
+sgl-omni serve \
+  --config examples/configs/qwen3_asr_rtx4090.yaml \
+  --port 8000
+```
+
+This qualified profile keeps the model in BF16, limits the stage to 16 running
+requests, and sets `mem_fraction_static` to `0.65`. Its bounds are specific to
+the validated RTX 4090 layout; use the default configuration or a separately
+qualified profile on other GPU architectures.
 
 For example, force synchronous decode when comparing modes:
 
