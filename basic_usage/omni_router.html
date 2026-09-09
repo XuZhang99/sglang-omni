@@ -589,6 +589,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="current nav bd-sidenav">
@@ -1279,8 +1280,11 @@ complete bodies, upstream body errors, and bodies dropped before completion.
 The post-commit relay-failure counter is the upstream-error subset.
 <code class="docutils literal notranslate"><span class="pre">/diagnostics</span></code> returns bounded deterministic JSON for the same router-local
 state and marks the configured voice owner. Each diagnostic worker includes
-its latest probe result, HTTP status when present, observation time, transition
-streaks, and cumulative outcomes.</p>
+cumulative dispatch counts for the fixed service classes and voice-control
+operations. A speech batch contributes one dispatch while active worker load
+remains item-weighted. Workers also include their latest probe result, HTTP
+status when present, observation time, transition streaks, and cumulative
+outcomes.</p>
 <p>Operations responses snapshot router-local state and never contact workers.
 Admission values come from the semaphores that enforce router limits. Worker
 load comes from the same counters used by <code class="docutils literal notranslate"><span class="pre">least_requests</span></code>. Metric labels use
